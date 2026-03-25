@@ -14,6 +14,7 @@ Features:
   - Hashes    : MD5 / SHA1 / SHA256
 """
 
+
 import argparse
 import base64
 import hashlib
@@ -452,6 +453,84 @@ def encoding_menu(file_path: str) -> str:
     return out_path
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  DECODING MENU
+# ═══════════════════════════════════════════════════════════════════════════════
+def decoding_menu(file_path: str) -> str:
+    """
+    Show interactive decoding menu.
+    Returns path to decoded file (.dec). Caller responsible for cleanup.
+    Returns original path unchanged if no decoding selected.
+    """
+    print()
+    print(magenta("  ┌───────────────────────────────┐"))
+    print(magenta("  │     Decoding Techniques       │"))
+    print(magenta("  ├───────────────────────────────┤"))
+    print(magenta("  │  [1] Base64                   │"))
+    print(magenta("  │  [2] Hex                      │"))
+    print(magenta("  │  [3] XOR  (key prompted)      │"))
+    print(magenta("  │  [4] Reverse bytes            │"))
+    print(magenta("  │  [5] XOR ← Base64             │"))
+    print(magenta("  │  [6] XOR ← Hex                │"))
+    print(magenta("  │  [7] RC4  (key prompted)      │"))
+    print(magenta("  └───────────────────────────────┘"))
+
+    choice    = input("  Select technique [1-7]: ").strip()
+    data      = read_file(file_path)
+    is_binary = True
+    decoded   = None
+
+    if choice == "1":
+        # Base64 decode
+        decoded = base64.b64decode(data)
+        ok("Base64 decoding applied.")
+
+    elif choice == "2":
+        # Hex decode
+        decoded = bytes.fromhex(data.decode().strip())
+        ok("Hex decoding applied.")
+
+    elif choice == "3":
+        # XOR decode
+        raw = input("  XOR key (hex e.g. 0x41 or decimal e.g. 65): ").strip()
+        key = parse_xor_key(raw)
+        decoded = xor_bytes(data, key)
+        ok(f"XOR decoding applied (key 0x{key:02X}).")
+
+    elif choice == "4":
+        # Reverse bytes
+        decoded = bytes(reversed(data))
+        ok("Byte order reversed (decode).")
+
+    elif choice == "5":
+        # XOR ← Base64
+        raw = input("  XOR key (hex e.g. 0x41 or decimal e.g. 65): ").strip()
+        key = parse_xor_key(raw)
+        decoded = xor_bytes(base64.b64decode(data), key)
+        ok(f"Base64 → XOR decoding applied (key 0x{key:02X}).")
+
+    elif choice == "6":
+        # XOR ← Hex
+        raw = input("  XOR key (hex e.g. 0x41 or decimal e.g. 65): ").strip()
+        key = parse_xor_key(raw)
+        decoded = xor_bytes(bytes.fromhex(data.decode().strip()), key)
+        ok(f"Hex → XOR decoding applied (key 0x{key:02X}).")
+
+    elif choice == "7":
+        # RC4 decode
+        key = prompt_rc4_key()
+        decoded = rc4(data, key)
+        ok(f"RC4 decoding applied (key length {len(key)} bytes).")
+
+    else:
+        print("  Invalid selection — no decoding applied.")
+        return file_path
+
+    out_path = file_path + ".dec"
+    write_file(out_path, decoded)
+    ok(f"Decoded file saved → {out_path}")
+    return out_path
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  INFO
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -622,8 +701,14 @@ def do_util(args):
         work_file = out_path
         temps.append(out_path)
 
-    # Encoding
-    if args.encode:
+
+    # Encoding/Decoding (mutually exclusive)
+    if getattr(args, "decode", False) and args.decode:
+        prev      = work_file
+        work_file = decoding_menu(work_file)
+        if work_file != prev:
+            temps.append(work_file)
+    elif args.encode:
         prev      = work_file
         work_file = encoding_menu(work_file)
         if work_file != prev:
@@ -640,6 +725,17 @@ def do_util(args):
     pp_args.strip_padding = False
 
     final = post_process_with_temps(work_file, pp_args, protected=[target], temps=temps)
+
+    # If --output is specified and the final file is not already at that path, move/rename it
+    if getattr(args, "output", None):
+        out_path = args.output
+        final_path = Path(final)
+        out_path_path = Path(out_path)
+        if str(final_path.resolve()) != str(out_path_path.resolve()):
+            import shutil
+            shutil.move(str(final_path), str(out_path_path))
+            ok(f"Final output moved/renamed → {out_path}")
+            final = str(out_path_path)
     return final
 
 def post_process_with_temps(work_file: str, args, protected: list, temps: list) -> str:
@@ -1144,9 +1240,13 @@ Examples:
     p.add_argument("--carrier",       "-c", help="Input file")
     p.add_argument("--output",        "-o", help="Output file path")
 
-    # Encoding
-    p.add_argument("--encode",        "-e", action="store_true",
-                   help="Show interactive encoding menu (includes RC4)")
+
+    # Encoding/Decoding (mutually exclusive)
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--encode",        "-e", action="store_true",
+                      help="Show interactive encoding menu (includes RC4)")
+    group.add_argument("--decode",        "-d", action="store_true",
+                      help="Show interactive decoding menu (includes RC4)")
 
     # Entropy
     p.add_argument("--lower-entropy", type=float, default=None,
