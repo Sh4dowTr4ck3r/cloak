@@ -146,7 +146,7 @@ function Write-Banner {
     if ($Quiet) { return }
     Write-Host ""
     Write-Host "  ╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║   Polyglot Embed + File Utility  (combined)   ║" -ForegroundColor Cyan
+    Write-Host "  ║                   cloak                        ║" -ForegroundColor Cyan
     Write-Host "  ╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
 }

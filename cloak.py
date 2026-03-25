@@ -84,7 +84,7 @@ def banner(quiet: bool):
         return
     print()
     print(cyan("  ╔════════════════════════════════════════════════╗"))
-    print(cyan("  ║   Polyglot Embed + File Utility  (Python)     ║"))
+    print(cyan("  ║                   cloak                        ║"))
     print(cyan("  ╚════════════════════════════════════════════════╝"))
     print()
 
