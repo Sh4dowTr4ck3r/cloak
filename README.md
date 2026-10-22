@@ -1,6 +1,8 @@
 # cloak.py
 
-A Python red team file utility for encoding, entropy manipulation, header spoofing, alternate data streams, and LOLBin command generation.
+A Python red team file utility for encoding, entropy manipulation, header spoofing, alternate data streams, and LOLBin command generation. 
+
+A Rust port of the Python utility can be found [here](https://github.com/Sh4dowTr4ck3r/cloak/tree/main/cloak-rs). 
 
 ---
 
